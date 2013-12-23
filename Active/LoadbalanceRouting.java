@@ -1,4 +1,4 @@
-package net.floodlightcontroller.ActiveLB;
+package net.floodlightcontroller.NSLActiveLB.Active;
 
 import java.util.ArrayList;
 import java.util.Collection;
