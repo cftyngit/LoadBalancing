@@ -46,7 +46,7 @@ import net.floodlightcontroller.routing.Route;
 import net.floodlightcontroller.topology.ITopologyService;
 import net.floodlightcontroller.topology.NodePortTuple;
 import net.floodlightcontroller.util.OFMessageDamper;
-import net.floodlightcontroller.ActiveLB.ILoadbalanceRoutingService;
+import net.floodlightcontroller.NSLActiveLB.Active.ILoadbalanceRoutingService;
 import net.floodlightcontroller.staticflowentry.IStaticFlowEntryPusherService;
 
 public class ActiveLoadBalancer implements IFloodlightModule,
