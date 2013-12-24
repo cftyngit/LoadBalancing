@@ -1,4 +1,4 @@
-package net.floodlightcontroller.NSLActiveLB.Active;
+package net.floodlightcontroller.LoadBalancing.Active;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -46,7 +46,7 @@ import net.floodlightcontroller.routing.Route;
 import net.floodlightcontroller.topology.ITopologyService;
 import net.floodlightcontroller.topology.NodePortTuple;
 import net.floodlightcontroller.util.OFMessageDamper;
-import net.floodlightcontroller.NSLActiveLB.Active.ILoadbalanceRoutingService;
+import net.floodlightcontroller.LoadBalancing.Active.ILoadbalanceRoutingService;
 import net.floodlightcontroller.staticflowentry.IStaticFlowEntryPusherService;
 
 public class ActiveLoadBalancer implements IFloodlightModule,
@@ -66,6 +66,7 @@ public class ActiveLoadBalancer implements IFloodlightModule,
     protected static int OFMESSAGE_DAMPER_CAPACITY = 10000; // ms. 
     protected static int OFMESSAGE_DAMPER_TIMEOUT = 250; // ms 
 	protected static int LB_PRIORITY = 10235;
+	protected static String LB_ETHER_TYPE = "0x800";
 	
 	@Override
 	public String getName() {
@@ -111,6 +112,8 @@ public class ActiveLoadBalancer implements IFloodlightModule,
 		// TODO Auto-generated method stub
 		return null;
 	}
+	
+	//copy from ForwadingBase
     public Comparator<SwitchPort> clusterIdComparator =
             new Comparator<SwitchPort>() {
                 @Override
@@ -159,8 +162,11 @@ public class ActiveLoadBalancer implements IFloodlightModule,
 		Ethernet eth = IFloodlightProviderService.bcStore.get(cntx,
                 IFloodlightProviderService.CONTEXT_PI_PAYLOAD);
 		IPacket pkt = eth.getPayload();
-		
-		if (pkt instanceof IPv4) {
+		if(eth.isBroadcast() || eth.isMulticast())
+		{
+			return Command.CONTINUE;
+		}
+		else if (pkt instanceof IPv4) {
 			
 	        IPv4 ip_pkt = (IPv4) pkt;
 	        int destIpAddress = ip_pkt.getDestinationAddress();
@@ -170,11 +176,10 @@ public class ActiveLoadBalancer implements IFloodlightModule,
 	        // packet out based on table rule
 	        pushPacket(pkt, sw, pi.getBufferId(), pi.getInPort(), OFPort.OFPP_TABLE.getValue(),
                     cntx, true);
-	        System.out.println("go into ActiveLoadBalancer && goto stop");
+
 	        return Command.STOP;
 		}
-		// bypass non-load-balanced traffic for normal processing (forwarding)
-		System.out.println("go into ActiveLoadBalancer && goto continue");
+
 		return Command.CONTINUE;
 	}
 	
@@ -189,7 +194,6 @@ public class ActiveLoadBalancer implements IFloodlightModule,
                         srcDevice = d;
                     if (dstDevice == null && destIpAddress == d.getIPv4Addresses()[j]) {
                         dstDevice = d;
-                        //member.macString = dstDevice.getMACAddressString();
                     }
                     if (srcDevice != null && dstDevice != null)
                         break;
@@ -276,13 +280,12 @@ public class ActiveLoadBalancer implements IFloodlightModule,
                     // out: match dest client (ip, port), rewrite src from member ip/port to vip ip/port, forward
                     
                     if (routeIn != null) {
-                        pushStaticVipRoute(true, routeIn, srcIpAddress, destIpAddress, sw.getId());
+                        pushStaticVipRoute(true, routeIn, srcIpAddress, destIpAddress);
                     }
                     
                     if (routeOut != null) {
-                        pushStaticVipRoute(false, routeOut, srcIpAddress, destIpAddress, sw.getId());
+                        pushStaticVipRoute(false, routeOut, srcIpAddress, destIpAddress);
                     }
-
                 }
                 iSrcDaps++;
                 iDstDaps++;
@@ -302,7 +305,7 @@ public class ActiveLoadBalancer implements IFloodlightModule,
      * @param LBMember member
      * @param long pinSwitch
      */
-    public void pushStaticVipRoute(boolean inBound, Route route, int ipFrom, int ipTo, long pinSwitch) {
+    public void pushStaticVipRoute(boolean inBound, Route route, int ipFrom, int ipTo) {
         List<NodePortTuple> path = route.getPath();
         if (path.size()>0) {
            for (int i = 0; i < path.size(); i+=2) {
@@ -330,33 +333,25 @@ public class ActiveLoadBalancer implements IFloodlightModule,
                            +"-srcswitch-"+path.get(0).getNodeId()+"-sw-"+sw;
                    matchString = "nw_src="+IPv4.fromIPv4Address(ipFrom)+","
                                + "nw_dst="+IPv4.fromIPv4Address(ipTo)+","
+                               + "dl_type="+LB_ETHER_TYPE+","
                                + "in_port="+String.valueOf(path.get(i).getPortId());
 
-                   if (sw == pinSwitch) {
-                       actionString = "output="+path.get(i+1).getPortId();
-                   } else {
-                       actionString =
-                               "output="+path.get(i+1).getPortId();
-                   }
+                   actionString = "output="+path.get(i+1).getPortId();
+                   
                } else {
                    entryName = "outbound-from-ip-"+ ipTo+"-to-ip-"+ipFrom
                            +"-srcswitch-"+path.get(0).getNodeId()+"-sw-"+sw;
                    matchString = "nw_dst="+IPv4.fromIPv4Address(ipFrom)+","
                 		       + "nw_src="+IPv4.fromIPv4Address(ipTo)+","
+                		       + "dl_type="+LB_ETHER_TYPE+","
                                + "in_port="+String.valueOf(path.get(i).getPortId());
 
-                   if (sw == pinSwitch) {
-                       actionString = "output="+path.get(i+1).getPortId();
-                   } else {
-                       actionString = "output="+path.get(i+1).getPortId();
-                   }
-                   
+                   actionString = "output="+path.get(i+1).getPortId();
                }
                
                parseActionString(fm, actionString, log);
 
                fm.setPriority(U16.t(LB_PRIORITY));
-
                OFMatch ofMatch = new OFMatch();
                try {
                    ofMatch.fromString(matchString);

@@ -1,4 +1,4 @@
-package net.floodlightcontroller.NSLActiveLB.Active;
+package net.floodlightcontroller.LoadBalancing.Active;
 
 import java.util.ArrayList;
 import java.util.Collection;
