@@ -67,7 +67,10 @@ public class ActiveLoadBalancer implements IFloodlightModule,
     protected static int OFMESSAGE_DAMPER_TIMEOUT = 250; // ms 
 	protected static int LB_PRIORITY = 10235;
 	protected static String LB_ETHER_TYPE = "0x800";
-	
+
+	protected static short FLOWMOD_DEFAULT_IDLE_TIMEOUT = 300; // in seconds
+	public static short FLOWMOD_DEFAULT_HARD_TIMEOUT = 0; // infinite
+
 	@Override
 	public String getName() {
 		return "activeLoadbalancer";
@@ -280,11 +283,11 @@ public class ActiveLoadBalancer implements IFloodlightModule,
                     // out: match dest client (ip, port), rewrite src from member ip/port to vip ip/port, forward
                     
                     if (routeIn != null) {
-                        pushStaticVipRoute(true, routeIn, srcIpAddress, destIpAddress);
+                        pushStaticVipRoute(true, routeIn, srcIpAddress, destIpAddress,cntx);
                     }
                     
                     if (routeOut != null) {
-                        pushStaticVipRoute(false, routeOut, srcIpAddress, destIpAddress);
+                        pushStaticVipRoute(false, routeOut, srcIpAddress, destIpAddress,cntx);
                     }
                 }
                 iSrcDaps++;
@@ -305,157 +308,74 @@ public class ActiveLoadBalancer implements IFloodlightModule,
      * @param LBMember member
      * @param long pinSwitch
      */
-    public void pushStaticVipRoute(boolean inBound, Route route, int ipFrom, int ipTo) {
+    public void pushStaticVipRoute(boolean inBound, Route route, int ipFrom, int ipTo,FloodlightContext cntx) {
         List<NodePortTuple> path = route.getPath();
         if (path.size()>0) {
-           for (int i = 0; i < path.size(); i+=2) {
+		   //Wildcardc
+		   Integer wildcard_hints = null;
+		   OFFlowMod fm = (OFFlowMod) floodlightProvider.getOFMessageFactory().getMessage(OFType.FLOW_MOD);
+		   //OFMatch
+		   OFMatch match = new OFMatch();
+		   match.setDataLayerType((short)0x800);
+		   match.setNetworkDestination(ipTo);
+		   match.setNetworkSource(ipFrom);
+		   //OFActions
+		   OFActionOutput action = new OFActionOutput();
+		   action.setMaxLength((short)0xffff);
+		   List<OFAction> actions = new ArrayList<OFAction>();
+		   actions.add(action);
+
+		   fm.setIdleTimeout(FLOWMOD_DEFAULT_IDLE_TIMEOUT)
+			   .setHardTimeout(FLOWMOD_DEFAULT_HARD_TIMEOUT)
+			   .setBufferId(OFPacketOut.BUFFER_ID_NONE)
+			   .setCookie((long)0)
+			   .setPriority((short)1024)
+			   .setCommand(OFFlowMod.OFPFC_ADD)
+			   .setMatch(match)
+			   .setActions(actions)
+			   .setLengthU(OFFlowMod.MINIMUM_LENGTH+OFActionOutput.MINIMUM_LENGTH);
+					   	 
+           for (int i = path.size()-1 ; i >0 ; i -=2 ) {
                
                long sw = path.get(i).getNodeId();
-               String swString = HexString.toHexString(path.get(i).getNodeId());
-               String entryName;
-               String matchString = null;
-               String actionString = null;
-               
-               OFFlowMod fm = (OFFlowMod) floodlightProvider.getOFMessageFactory()
-                       .getMessage(OFType.FLOW_MOD);
+			   IOFSwitch swnode = floodlightProvider.getSwitch(sw);
+			   wildcard_hints = ((Integer) swnode.getAttribute(IOFSwitch.PROP_FASTWILDCARDS)).intValue()
+				   			& ~OFMatch.OFPFW_IN_PORT
+							& ~OFMatch.OFPFW_NW_SRC_MASK
+							& ~OFMatch.OFPFW_NW_DST_MASK
+							& ~OFMatch.OFPFW_DL_TYPE;
 
-               fm.setIdleTimeout((short) 0);   // infinite
-               fm.setHardTimeout((short) 0);   // infinite
-               fm.setBufferId(OFPacketOut.BUFFER_ID_NONE);
-               fm.setCommand((short) 0);
-               fm.setFlags((short) 0);
-               fm.setOutPort(OFPort.OFPP_NONE.getValue());
-               fm.setCookie((long) 0);  
-               fm.setPriority(Short.MAX_VALUE);
-               
-               if (inBound) {
-                   entryName = "inbound-from-ip-"+ ipFrom+"-to-ip-"+ipTo
-                           +"-srcswitch-"+path.get(0).getNodeId()+"-sw-"+sw;
-                   matchString = "nw_src="+IPv4.fromIPv4Address(ipFrom)+","
-                               + "nw_dst="+IPv4.fromIPv4Address(ipTo)+","
-                               + "dl_type="+LB_ETHER_TYPE+","
-                               + "in_port="+String.valueOf(path.get(i).getPortId());
-
-                   actionString = "output="+path.get(i+1).getPortId();
-                   
-               } else {
-                   entryName = "outbound-from-ip-"+ ipTo+"-to-ip-"+ipFrom
-                           +"-srcswitch-"+path.get(0).getNodeId()+"-sw-"+sw;
-                   matchString = "nw_dst="+IPv4.fromIPv4Address(ipFrom)+","
-                		       + "nw_src="+IPv4.fromIPv4Address(ipTo)+","
-                		       + "dl_type="+LB_ETHER_TYPE+","
-                               + "in_port="+String.valueOf(path.get(i).getPortId());
-
-                   actionString = "output="+path.get(i+1).getPortId();
-               }
-               
-               parseActionString(fm, actionString, log);
-
-               fm.setPriority(U16.t(LB_PRIORITY));
-               OFMatch ofMatch = new OFMatch();
+               fm.setMatch(wildcard(match,swnode,wildcard_hints));
+			   fm.getMatch().setInputPort(path.get(i-1).getPortId());
+			   ((OFActionOutput)fm.getActions().get(0)).setPort(path.get(i).getPortId());
+				
                try {
-                   ofMatch.fromString(matchString);
-               } catch (IllegalArgumentException e) {
-                   log.debug("ignoring flow entry {} on switch {} with illegal OFMatch() key: "
-                                     + matchString, entryName, swString);
+			   	   messageDamper.write(swnode,fm,cntx);
+               } catch (IOException e) {
+				   log.info("match string = {}",fm.getMatch().toString());
+				   log.info("action string = {}",((OFActionOutput)fm.getActions().get(0)).toString());
                }
-        
-               fm.setMatch(ofMatch);
-               sfp.addFlow(entryName, fm, swString);
-
+			   try {
+				   fm = fm.clone();
+			   }catch (CloneNotSupportedException e){
+					log.error(" clone faile");
+				}
+					
            }
         }
         return;
     }
     
-    // Utilities borrowed from StaticFlowEntries
     
-    private static class SubActionStruct {
-        OFAction action;
-        int      len;
+	protected OFMatch wildcard(OFMatch match, IOFSwitch sw,
+                               Integer wildcard_hints) {
+        if (wildcard_hints != null) {
+            return match.clone().setWildcards(wildcard_hints.intValue());
+        }
+        return match.clone();
     }
+
     
-    /**
-     * Parses OFFlowMod actions from strings.
-     * @param flowMod The OFFlowMod to set the actions for
-     * @param actionstr The string containing all the actions
-     * @param log A logger to log for errors.
-     */
-    public static void parseActionString(OFFlowMod flowMod, String actionstr, Logger log) {
-        List<OFAction> actions = new LinkedList<OFAction>();
-        int actionsLength = 0;
-        if (actionstr != null) {
-            actionstr = actionstr.toLowerCase();
-            for (String subaction : actionstr.split(",")) {
-                String action = subaction.split("[=:]")[0];
-                SubActionStruct subaction_struct = null;
-                
-                if (action.equals("output")) {
-                    subaction_struct = decode_output(subaction, log);
-                }
-                else {
-                    log.error("Unexpected action '{}', '{}'", action, subaction);
-                }
-                
-                if (subaction_struct != null) {
-                    actions.add(subaction_struct.action);
-                    actionsLength += subaction_struct.len;
-                }
-            }
-        }
-        log.debug("action {}", actions);
-        
-        flowMod.setActions(actions);
-        flowMod.setLengthU(OFFlowMod.MINIMUM_LENGTH + actionsLength);
-    } 
-    
-    private static SubActionStruct decode_output(String subaction, Logger log) {
-        SubActionStruct sa = null;
-        Matcher n;
-        
-        n = Pattern.compile("output=(?:((?:0x)?\\d+)|(all)|(controller)|(local)|(ingress-port)|(normal)|(flood))").matcher(subaction);
-        if (n.matches()) {
-            OFActionOutput action = new OFActionOutput();
-            action.setMaxLength((short) Short.MAX_VALUE);
-            short port = OFPort.OFPP_NONE.getValue();
-            if (n.group(1) != null) {
-                try {
-                    port = get_short(n.group(1));
-                }
-                catch (NumberFormatException e) {
-                    log.debug("Invalid port in: '{}' (error ignored)", subaction);
-                    return null;
-                }
-            }
-            else if (n.group(2) != null)
-                port = OFPort.OFPP_ALL.getValue();
-            else if (n.group(3) != null)
-                port = OFPort.OFPP_CONTROLLER.getValue();
-            else if (n.group(4) != null)
-                port = OFPort.OFPP_LOCAL.getValue();
-            else if (n.group(5) != null)
-                port = OFPort.OFPP_IN_PORT.getValue();
-            else if (n.group(6) != null)
-                port = OFPort.OFPP_NORMAL.getValue();
-            else if (n.group(7) != null)
-                port = OFPort.OFPP_FLOOD.getValue();
-            action.setPort(port);
-            log.debug("action {}", action);
-            
-            sa = new SubActionStruct();
-            sa.action = action;
-            sa.len = OFActionOutput.MINIMUM_LENGTH;
-        }
-        else {
-            log.error("Invalid subaction: '{}'", subaction);
-            return null;
-        }
-        
-        return sa;
-    }
-    private static short get_short(String str) {
-        return (short)(int)Integer.decode(str);
-    }
     /**
      * used to push any packet - borrowed routine from Forwarding
      * 
