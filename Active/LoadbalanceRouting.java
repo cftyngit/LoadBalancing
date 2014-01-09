@@ -5,13 +5,16 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 import org.openflow.protocol.OFPacketOut;
 
+import net.floodlightcontroller.LoadBalancing.Active.dijkstra.engine.DijkstraAlgorithm;
 import net.floodlightcontroller.LoadBalancing.Active.dijkstra.model.Edge;
+import net.floodlightcontroller.LoadBalancing.Active.dijkstra.model.Graph;
 import net.floodlightcontroller.LoadBalancing.Active.dijkstra.model.Vertex;
 import net.floodlightcontroller.core.IFloodlightProviderService;
 import net.floodlightcontroller.core.module.FloodlightModuleContext;
@@ -39,14 +42,28 @@ public class LoadbalanceRouting implements ILinkDiscoveryListener,
 			this.second_ = second;
 		}
 	}
+	class pairSwitch {
+		public long first_;
+		public long second_;
 
+		pairSwitch(long first, long second) {
+			this.first_ = first;
+			this.second_ = second;
+		}
+	}
 	private final int DEFAULT_LINK_WEIGHT = 1;
 	protected ILinkDiscoveryService linkDiscovery;
 	protected IRoutingService routingEngine;
-	protected HashMap<pairNodePortTuple, Set<Route>> pathMap;
-	protected HashMap<pairNodePortTuple, Edge> switchLink;
+	protected HashMap<pairNodePortTuple, Set<Route> > pathMap;
+	protected HashMap<pairSwitch, List<Edge> > switchLink;
 	private List<Edge> links;
 	private List<Vertex> switchs;
+
+	class path extends LinkedList<Vertex> {
+		path(LinkedList<Vertex> a) {
+			super(a);
+		}
+	}
 
 	@Override
 	public Route getRoute(long srcId, short srcPort, long dstId, short dstPort,
@@ -57,8 +74,8 @@ public class LoadbalanceRouting implements ILinkDiscoveryListener,
 		// findOtherPATH in other thread.
 		// If pair<NodePortTuple> -> set<Route> is not empty,
 		// choose a path from set<Route> by round robin maybe?
-		pairNodePortTuple query = new pairNodePortTuple(new NodePortTuple(srcId, srcPort), 
-														new NodePortTuple(dstId, dstPort));
+		pairNodePortTuple query = new pairNodePortTuple(new NodePortTuple(
+				srcId, srcPort), new NodePortTuple(dstId, dstPort));
 		Set<Route> retRoute = pathMap.get(query);
 		if (retRoute == null || retRoute.size() == 0) {
 			return findFirstPATH(srcId, srcPort, dstId, dstPort);
@@ -88,27 +105,37 @@ public class LoadbalanceRouting implements ILinkDiscoveryListener,
 					if (from == null
 							&& currentSwitch.getId() == currentUpdate.getSrc()) {
 						from = new Vertex(currentSwitch);
-						from.setSwitchPort(new NodePortTuple(currentUpdate.getSrc(), currentUpdate.getSrcPort()));
+						from.setSwitchPort(new NodePortTuple(currentUpdate
+								.getSrc(), currentUpdate.getSrcPort()));
 						continue;
 					} else if (to == null
 							&& currentSwitch.getId() == currentUpdate.getDst()) {
 						to = new Vertex(currentSwitch);
-						from.setSwitchPort(new NodePortTuple(currentUpdate.getDst(), currentUpdate.getDstPort()));
+						from.setSwitchPort(new NodePortTuple(currentUpdate
+								.getDst(), currentUpdate.getDstPort()));
 						continue;
 					}
 					if (from != null && to != null)
 						break;
 				}
 				if (from != null && to != null) {
-					Edge newLink = new Edge(String.valueOf(currentUpdate.getSrc())
-							+ "-" + String.valueOf(currentUpdate.getSrcPort())
-							+ "to" + String.valueOf(currentUpdate.getDst())
-							+ "-" + String.valueOf(currentUpdate.getDstPort()),
-							from, to, DEFAULT_LINK_WEIGHT);
+					Edge newLink = new Edge(String.valueOf(currentUpdate
+							.getSrc())
+							+ "-"
+							+ String.valueOf(currentUpdate.getSrcPort())
+							+ "to"
+							+ String.valueOf(currentUpdate.getDst())
+							+ "-"
+							+ String.valueOf(currentUpdate.getDstPort()), from,
+							to, DEFAULT_LINK_WEIGHT);
 					links.add(newLink);
-					switchLink.put(new pairNodePortTuple(
-							new NodePortTuple(currentUpdate.getSrc(), currentUpdate.getSrcPort()), 
-							new NodePortTuple(currentUpdate.getDst(), currentUpdate.getDstPort())), newLink );
+					List<Edge> switchPairLinks = switchLink.get(new pairSwitch(currentUpdate.getSrc(), currentUpdate.getDst()));
+					if(switchPairLinks == null)
+					{
+						List<Edge> l = new ArrayList<Edge>();
+						l.add(newLink);
+						switchLink.put(new pairSwitch(currentUpdate.getSrc(), currentUpdate.getDst()), l);
+					}
 				}
 
 			}
@@ -122,9 +149,7 @@ public class LoadbalanceRouting implements ILinkDiscoveryListener,
 					if (o.getId() == targetId)
 						links.remove(o);
 				}
-				switchLink.remove(new pairNodePortTuple(
-							new NodePortTuple(currentUpdate.getSrc(), currentUpdate.getSrcPort()), 
-							new NodePortTuple(currentUpdate.getDst(), currentUpdate.getDstPort())));
+				switchLink.remove(new pairSwitch(currentUpdate.getSrc(), currentUpdate.getDst()));
 			}
 				break;
 			case SWITCH_UPDATED:
@@ -155,8 +180,24 @@ public class LoadbalanceRouting implements ILinkDiscoveryListener,
 		// add them into the set<Route>
 		// This function should run in other thread
 		// remember to use mutex
-
-		return null;
+		Graph graph = new Graph(switchs, links);
+		DijkstraAlgorithm dijkstra = new DijkstraAlgorithm(graph);
+		Vertex from = null;
+		Vertex to = null;
+		
+		for (Vertex v : switchs) {
+			if(v.getId() == srcId)
+				from = v;
+			else if(v.getId() == dstId)
+				to = v;
+			
+			if(from != null && to != null)
+				break;
+		}
+		dijkstra.execute(from);
+		path p = new path(dijkstra.getPath(to));
+		
+		return pathToRoute(p);
 	}
 
 	private Route getRouteFromSet(Set<Route> routes) {
@@ -169,10 +210,54 @@ public class LoadbalanceRouting implements ILinkDiscoveryListener,
 		return null;
 	}
 
-	public void updateweight(Route path) {
+	public void updateWeight(Route route, int value) {
 		// TODO this function will update the link weight in
 		// switch_connect_map(if any)
+		List<NodePortTuple> rpath = route.getPath();
+		for(int i = 0; i < rpath.size(); i += 2)
+		{
+			NodePortTuple lineFrom = rpath.get(i);
+			NodePortTuple lineTo = rpath.get(i + 1);
+			List<Edge> pairSwitchLinks = switchLink.get(new pairSwitch(lineFrom.getNodeId(), lineTo.getNodeId()));
+			for(Edge line : pairSwitchLinks)
+			{
+				if(line.getSource().getSwitchPort() == lineFrom && 
+						line.getDestination().getSwitchPort() == lineTo) {
+					line.setWeight(line.getWeight() + value);
+					break;
+				}
+					
+			}
+		}
+	}
 
+	private Route pathToRoute(path p) {
+		if(p == null)
+			return null;
+		
+		Route rt = new Route(p.getFirst().getId(), p.getLast().getId());
+		List<NodePortTuple> switchPorts = new ArrayList<NodePortTuple>();
+		for(int i = 0; i < p.size(); i += 2)
+		{
+			long switchFrom = p.get(i).getId();
+			long switchTo = p.get(i + 1).getId();
+			List<Edge> pairSwitchLinks = switchLink.get(new pairSwitch(switchFrom, switchTo));
+			if(pairSwitchLinks == null)
+				return null;
+			
+			Edge minEdge = null;
+			int minWeight = Integer.MAX_VALUE;
+			for(Edge line : pairSwitchLinks)
+			{
+				if(line.getWeight() < minWeight) {
+					minEdge = line;
+				}	
+			}
+			switchPorts.add(minEdge.getSource().getSwitchPort());
+			switchPorts.add(minEdge.getDestination().getSwitchPort());
+		}
+		rt.setPath(switchPorts);
+		return rt;
 	}
 
 	@Override
